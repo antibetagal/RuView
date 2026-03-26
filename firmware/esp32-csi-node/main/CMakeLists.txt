@@ -21,6 +21,6 @@ endif()
 
 idf_component_register(
     SRCS ${SRCS}
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS  "." "$ENV{IDF_PATH}/components/openthread/openthread/third_party/mbedtls/repo/include/mbedtls"
     REQUIRES ${REQUIRES}
 )

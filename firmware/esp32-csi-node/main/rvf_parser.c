@@ -10,7 +10,7 @@
 
 #include <string.h>
 #include "esp_log.h"
-#include "mbedtls/sha256.h"
+#include "sha256.h"
 
 static const char *TAG = "rvf";
 
