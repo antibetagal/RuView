@@ -25,6 +25,7 @@ axum = { workspace = true }
 tower-http = { version = "0.5", features = ["fs", "cors", "set-header"] }
 tokio = { workspace = true, features = ["full", "process"] }
 futures-util = "0.3"
+ruvector-mincut = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -42,6 +43,9 @@ clap = { workspace = true }
 
 # Multi-BSSID WiFi scanning pipeline (ADR-022 Phase 3)
 wifi-densepose-wifiscan = { version = "0.3.0", path = "../wifi-densepose-wifiscan" }
+
+# Signal processing with RuvSense pose tracker (accuracy sprint)
+wifi-densepose-signal = { version = "0.3.0", path = "../wifi-densepose-signal" }
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -21,6 +21,7 @@ WiFi DensePose turns commodity WiFi signals into real-time human pose estimation
    - [Windows WiFi (RSSI Only)](#windows-wifi-rssi-only)
    - [ESP32-S3 (Full CSI)](#esp32-s3-full-csi)
    - [ESP32 Multistatic Mesh (Advanced)](#esp32-multistatic-mesh-advanced)
+   - [Cognitum Seed Integration (ADR-069)](#cognitum-seed-integration-adr-069)
 5. [REST API Reference](#rest-api-reference)
 6. [WebSocket Streaming](#websocket-streaming)
 7. [Web UI](#web-ui)
@@ -37,7 +38,9 @@ WiFi DensePose turns commodity WiFi signals into real-time human pose estimation
 14. [Hardware Setup](#hardware-setup)
     - [ESP32-S3 Mesh](#esp32-s3-mesh)
     - [Intel 5300 / Atheros NIC](#intel-5300--atheros-nic)
-15. [Docker Compose (Multi-Service)](#docker-compose-multi-service)
+15. [Camera-Free Pose Training](#camera-free-pose-training)
+16. [ruvllm Training Pipeline](#ruvllm-training-pipeline)
+17. [Docker Compose (Multi-Service)](#docker-compose-multi-service)
 16. [Testing Firmware Without Hardware (QEMU)](#testing-firmware-without-hardware-qemu)
     - [What You Need](#what-you-need)
     - [Your First Test Run](#your-first-test-run)
@@ -99,6 +102,20 @@ Multi-architecture image (amd64 + arm64). Works on Intel/AMD and Apple Silicon M
 Example: `docker run -e CSI_SOURCE=esp32 -p 3000:3000 -p 5005:5005/udp ruvnet/wifi-densepose:latest`
 
 ### From Source (Rust)
+
+On Debian/Ubuntu-based Linux systems, install the native desktop prerequisites before the first Rust release build:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential pkg-config \
+  libglib2.0-dev libgtk-3-dev \
+  libsoup-3.0-dev \
+  libjavascriptcoregtk-4.1-dev \
+  libwebkit2gtk-4.1-dev
+```
+
+This prepares the native GTK/WebKit dependencies used by the desktop/Tauri crates in this workspace.
 
 ```bash
 git clone https://github.com/ruvnet/RuView.git
@@ -314,6 +331,72 @@ The mesh uses a **Time-Division Multiplexing (TDM)** protocol so nodes take turn
 
 See [ADR-029](adr/ADR-029-ruvsense-multistatic-sensing-mode.md) and [ADR-032](adr/ADR-032-multistatic-mesh-security-hardening.md) for the full design.
 
+### Cognitum Seed Integration (ADR-069)
+
+Connect an ESP32-S3 to a [Cognitum Seed](https://cognitum.one) (Pi Zero 2 W, ~$15) for persistent vector storage, kNN similarity search, cryptographic witness chain, and AI-accessible sensing via MCP proxy.
+
+**What the Seed adds:**
+- **RVF vector store** — Persistent 8-dim feature vectors with content-addressed IDs and kNN search (cosine, L2, dot product)
+- **Witness chain** — SHA-256 tamper-evident audit trail for every ingest operation
+- **Ed25519 custody** — Device-bound keypair for cryptographic attestation of sensing data
+- **Sensor fusion** — BME280 (temp/humidity/pressure), PIR motion, reed switch, 4-ch ADC provide environmental ground truth
+- **MCP proxy** — 114 tools via JSON-RPC 2.0 so AI assistants (Claude, GPT) can query sensing state directly
+- **Reflex rules** — Automatic alarm triggers based on fragility, drift, and anomaly thresholds
+
+**Setup:**
+
+```bash
+# 1. Plug in the Cognitum Seed via USB — appears as a network adapter at 169.254.42.1
+
+# 2. Pair your client (opens a 30-second window, USB-only for security)
+curl -sk -X POST https://169.254.42.1:8443/api/v1/pair/window
+curl -sk -X POST https://169.254.42.1:8443/api/v1/pair \
+  -H 'Content-Type: application/json' -d '{"client_name":"my-laptop"}'
+# Save the returned token — it is shown only once
+
+# 3. Provision ESP32 to send features to your laptop (where the bridge runs)
+python firmware/esp32-csi-node/provision.py --port COM9 \
+  --ssid "YourWiFi" --password "secret" \
+  --target-ip 192.168.1.20 --target-port 5006 --node-id 1
+
+# 4. Run the bridge (receives ESP32 UDP, ingests into Seed via HTTPS)
+export SEED_TOKEN="your-pairing-token"
+python scripts/seed_csi_bridge.py \
+  --seed-url https://169.254.42.1:8443 --token "$SEED_TOKEN" \
+  --udp-port 5006 --batch-size 10 --validate
+
+# 5. Check Seed status
+python scripts/seed_csi_bridge.py --token "$SEED_TOKEN" --stats
+
+# 6. Trigger compaction (reclaim disk space from deleted vectors)
+python scripts/seed_csi_bridge.py --token "$SEED_TOKEN" --compact
+```
+
+**Feature vector dimensions (magic `0xC5110003`, 48 bytes, 1 Hz):**
+
+| Dim | Feature | Range | Source |
+|-----|---------|-------|--------|
+| 0 | Presence score | 0.0–1.0 | `s_presence_score / 10.0` |
+| 1 | Motion energy | 0.0–1.0 | `s_motion_energy / 10.0` |
+| 2 | Breathing rate | 0.0–1.0 | `s_breathing_bpm / 30.0` |
+| 3 | Heart rate | 0.0–1.0 | `s_heartrate_bpm / 120.0` |
+| 4 | Phase variance | 0.0–1.0 | Mean Welford variance of top-K subcarriers |
+| 5 | Person count | 0.0–1.0 | Active persons / 4 |
+| 6 | Fall detected | 0.0 or 1.0 | Binary fall flag |
+| 7 | RSSI | 0.0–1.0 | `(rssi + 100) / 100` |
+
+**Architecture:**
+
+```
+ESP32-S3 ($9)  ──UDP:5006──>  Host (bridge)  ──HTTPS──>  Cognitum Seed ($15)
+  CSI @ 100 Hz                seed_csi_bridge.py           RVF vector store
+  Features @ 1 Hz            Batches, validates            kNN graph + boundary
+  Vitals @ 1 Hz              NaN rejection                 Witness chain
+                              Source IP filtering           114-tool MCP proxy
+```
+
+See [ADR-069](adr/ADR-069-cognitum-seed-csi-pipeline.md) for the complete design, validation results, and security analysis.
+
 ---
 
 ## REST API Reference
@@ -464,6 +547,110 @@ The built-in Three.js UI is served at `http://localhost:3000/ui/` (Docker) or th
 | Dashboard | System stats, throughput, connected WebSocket clients |
 
 Both UIs update in real-time via WebSocket and auto-detect the sensing server on the same origin.
+
+---
+
+## Dense Point Cloud (Camera + WiFi CSI Fusion)
+
+RuView can generate real-time 3D point clouds by fusing camera depth estimation with WiFi CSI spatial sensing. This creates a spatial model of the environment that updates in real-time.
+
+### Setup
+
+```bash
+# Build the pointcloud binary
+cd rust-port/wifi-densepose-rs
+cargo build --release -p wifi-densepose-pointcloud
+
+# Start the server (auto-detects camera + CSI). Loopback-only by default.
+./target/release/ruview-pointcloud serve --bind 127.0.0.1:9880
+```
+
+Open `http://localhost:9880` for the interactive Three.js 3D viewer.
+
+> **Security note.** The server exposes live camera, skeleton, vitals, and occupancy over HTTP. The `--bind` flag defaults to `127.0.0.1:9880` (loopback-only). Exposing on `0.0.0.0` or a LAN IP is opt-in — the server logs a warning when it does, but there is no auth/TLS layer. Put a reverse proxy in front if you need remote access.
+
+> **Brain URL.** Observations are POSTed to `http://127.0.0.1:9876` by default. Override via the `RUVIEW_BRAIN_URL` environment variable or the `--brain <url>` flag on `serve` / `train`.
+
+### Sensors
+
+| Sensor | Auto-detected | Data |
+|--------|--------------|------|
+| Camera (`/dev/video0`) | Yes (Linux UVC) | RGB frames → MiDaS depth → 3D points |
+| ESP32 CSI (UDP:3333) | Yes (if provisioned) | ADR-018 binary → occupancy + pose + vitals |
+| MiDaS depth server (port 9885) | Optional | GPU-accelerated neural depth estimation |
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `ruview-pointcloud serve --bind 127.0.0.1:9880` | Start HTTP server + Three.js viewer (loopback-only by default) |
+| `ruview-pointcloud demo` | Generate synthetic point cloud (no hardware needed) |
+| `ruview-pointcloud capture --output room.ply` | Capture single frame to PLY file |
+| `ruview-pointcloud cameras` | List available cameras |
+| `ruview-pointcloud train --data-dir ./data [--brain URL]` | Depth calibration + occupancy training (writes under canonicalized `data-dir`; refuses `..` traversal) |
+| `ruview-pointcloud csi-test --count 100` | Send test CSI frames (no ESP32 needed) |
+| `ruview-pointcloud fingerprint <name> [--seconds 5]` | Record a named CSI room fingerprint for later matching |
+
+### Pipeline Components
+
+1. **ADR-018 Parser** — Decodes ESP32 CSI binary frames from UDP (magic `0xC5110001` raw CSI and `0xC5110006` feature state), extracts I/Q subcarrier amplitudes and phases. Lives in `parser.rs`; unit-tested against hand-rolled test vectors.
+2. **Pose (stub)** — 17 COCO keypoint *layout* generated by `heuristic_pose_from_amplitude` from CSI amplitude energy. This is **not** the trained WiFlow model — it is a placeholder so the viewer has a skeleton to render. Wiring to real Candle/ONNX inference from the `wifi-densepose-nn` crate is a planned follow-up.
+3. **Vital Signs** — Breathing rate from CSI phase analysis (peak counting on stable subcarrier)
+4. **Motion Detection** — CSI amplitude variance over 20 frames, triggers adaptive capture
+5. **RF Tomography** — Backprojection from per-node RSSI to 8×8×4 occupancy grid
+6. **Camera Depth** — MiDaS monocular depth (GPU) with luminance+edge fallback
+7. **Sensor Fusion** — Voxel-grid merging of camera depth + CSI occupancy
+8. **Brain Bridge** — Stores spatial observations in the ruOS brain every 60 seconds
+
+### API Endpoints
+
+| Endpoint | Method | Returns |
+|----------|--------|---------|
+| `/health` | GET | `{"status": "ok"}` |
+| `/api/status` | GET | Camera, CSI, pipeline state, vitals, motion |
+| `/api/cloud` | GET | Point cloud (up to 1000 points) + pipeline data |
+| `/api/splats` | GET | Gaussian splats for Three.js rendering |
+| `/` | GET | Interactive Three.js 3D viewer |
+
+### Training
+
+The training pipeline calibrates depth estimation and occupancy detection:
+
+```bash
+ruview-pointcloud train --data-dir ~/.local/share/ruview/training --brain http://127.0.0.1:9876
+```
+
+This captures frames, runs depth calibration (grid search over scale/offset/gamma), trains occupancy thresholds, exports DPO preference pairs, and submits results to the ruOS brain.
+
+### Output Formats
+
+- **PLY** — Standard 3D point cloud (ASCII, with RGB color)
+- **Gaussian Splats** — JSON format for Three.js rendering
+- **Brain Memories** — Spatial observations stored as `spatial-observation`, `spatial-motion`, `spatial-vitals`
+
+### Deep Room Scan
+
+Capture a high-quality 3D model of the room:
+
+```bash
+# Stop the live server first (frees the camera)
+# Then capture 20 frames and process with MiDaS
+ruview-pointcloud capture --frames 20 --output room_model.ply
+```
+
+Result: 40,000+ voxels at 5cm resolution, 12,000+ Gaussian splats.
+
+### ESP32 Provisioning for CSI
+
+To send CSI data to the pointcloud server:
+
+```bash
+python3 firmware/esp32-csi-node/provision.py \
+    --port /dev/ttyACM0 \
+    --ssid "YourWiFi" --password "YourPassword" \
+    --target-ip 192.168.1.123 --target-port 3333 \
+    --node-id 1
+```
 
 ---
 
@@ -941,6 +1128,227 @@ These are advanced setups. See the respective driver documentation for installat
 
 ---
 
+## Camera-Free Pose Training
+
+RuView can train a 17-keypoint COCO pose model **without any camera** by fusing 10 sensor signals from the ESP32 nodes and Cognitum Seed:
+
+| Signal | Source | What it provides |
+|--------|--------|-----------------|
+| PIR sensor | Seed GPIO 6 | Binary presence ground truth |
+| BME280 temperature | Seed I2C | Occupancy proxy (temp rises with people) |
+| BME280 humidity | Seed I2C | Breathing confirmation |
+| Cross-node RSSI | 2x ESP32 | Rough XY position (triangulation) |
+| Vitals stability | ESP32 DSP | Activity level (stable HR = stationary) |
+| Temporal CSI patterns | ESP32 DSP | Walk (periodic), sit (stable), empty (flat) |
+| kNN clusters | Seed vector store | Natural state groupings |
+| Boundary fragility | Seed graph analysis | Regime changes (enter/exit) |
+| Reed switch | Seed GPIO 5 | Door open/close events |
+| Vibration sensor | Seed GPIO 13 | Footstep detection |
+
+### How It Works
+
+The pipeline generates weak labels from sensor fusion, then trains in 5 phases:
+
+1. **Multi-modal collection** — Syncs CSI frames with Seed sensor events
+2. **Weak label generation** — RSSI triangulation for head position, subcarrier asymmetry for hands, vibration for feet
+3. **5-keypoint pose proxy** — Trains head/hands/feet positions from fused signals
+4. **17-keypoint interpolation** — Derives full COCO skeleton using bone length constraints
+5. **Self-refinement** — Bootstraps from confident predictions (3 rounds)
+
+```bash
+# With Cognitum Seed connected (all 10 signals):
+node scripts/train-camera-free.js \
+  --data data/recordings/pretrain-*.csi.jsonl \
+  --seed-url https://169.254.42.1:8443 \
+  --seed-token "$SEED_TOKEN"
+
+# Without Seed (CSI-only, 3 signals — still works):
+node scripts/train-camera-free.js \
+  --data data/recordings/pretrain-*.csi.jsonl --no-seed
+```
+
+**Output:** 82.8 KB model (8 KB at 4-bit) with 17-keypoint predictions, 0 skeleton violations, LoRA per-node adapters, and EWC protection against forgetting.
+
+See [ADR-071](adr/ADR-071-ruvllm-training-pipeline.md) and the [pretraining tutorial](tutorials/cognitum-seed-pretraining.md) for the full walkthrough.
+
+---
+
+## Camera-Supervised Pose Training (v0.7.0)
+
+For significantly higher accuracy, use a webcam as a **temporary teacher** during training. The camera captures real 17-keypoint poses via MediaPipe, paired with simultaneous ESP32 CSI data. After training, the camera is no longer needed — the model runs on CSI only.
+
+**Result: 92.9% PCK@20** from a 5-minute collection session.
+
+### Requirements
+
+- Python 3.9+ with `mediapipe` and `opencv-python` (`pip install mediapipe opencv-python`)
+- ESP32-S3 node streaming CSI over UDP (port 5005)
+- A webcam (laptop, USB, or Mac camera via Tailscale)
+
+### Step 1: Capture Camera + CSI Simultaneously
+
+Run both scripts at the same time (in separate terminals):
+
+```bash
+# Terminal 1: Record ESP32 CSI
+python scripts/record-csi-udp.py --duration 300
+
+# Terminal 2: Capture camera keypoints
+python scripts/collect-ground-truth.py --duration 300 --preview
+```
+
+Move around naturally in front of the camera for 5 minutes. The `--preview` flag shows a live skeleton overlay.
+
+### Step 2: Align and Train
+
+```bash
+# Align camera keypoints with CSI windows
+node scripts/align-ground-truth.js \
+  --gt data/ground-truth/*.jsonl \
+  --csi data/recordings/csi-*.csi.jsonl
+
+# Train (start with lite, scale up as you collect more data)
+node scripts/train-wiflow-supervised.js \
+  --data data/paired/*.jsonl \
+  --scale lite \
+  --epochs 50
+
+# Evaluate
+node scripts/eval-wiflow.js \
+  --model models/wiflow-supervised/wiflow-v1.json \
+  --data data/paired/*.jsonl
+```
+
+### Scale Presets
+
+| Preset | Params | Training Time | Best For |
+|--------|--------|---------------|----------|
+| `--scale lite` | 189K | ~19 min | < 1,000 samples (5 min capture) |
+| `--scale small` | 474K | ~1 hr | 1K-10K samples |
+| `--scale medium` | 800K | ~2 hrs | 10K-50K samples |
+| `--scale full` | 7.7M | ~8 hrs | 50K+ samples (GPU recommended) |
+
+See [ADR-079](adr/ADR-079-camera-ground-truth-training.md) for the full design and optimization details.
+
+---
+
+## Pre-Trained Models (No Training Required)
+
+Pre-trained models are available on HuggingFace: **https://huggingface.co/ruvnet/wifi-densepose-pretrained**
+
+Download and start sensing immediately — no datasets, no GPU, no training needed.
+
+### Quick Start with Pre-Trained Models
+
+```bash
+# Install huggingface CLI
+pip install huggingface_hub
+
+# Download all models
+huggingface-cli download ruvnet/wifi-densepose-pretrained --local-dir models/pretrained
+
+# The models include:
+#   model.safetensors    — 48 KB contrastive encoder
+#   model-q4.bin         — 8 KB quantized (recommended)
+#   model-q2.bin         — 4 KB ultra-compact (ESP32 edge)
+#   presence-head.json   — presence detection head (100% accuracy)
+#   node-1.json          — LoRA adapter for room 1
+#   node-2.json          — LoRA adapter for room 2
+```
+
+### What the Models Do
+
+The pre-trained encoder converts 8-dim CSI feature vectors into 128-dim embeddings. These embeddings power all 17 sensing applications:
+
+- **Presence detection** — 100% accuracy, never misses, never false alarms
+- **Environment fingerprinting** — kNN search finds "states like this one"
+- **Anomaly detection** — embeddings that don't match known clusters = anomaly
+- **Activity classification** — different activities cluster in embedding space
+- **Room adaptation** — swap LoRA adapters for different rooms without retraining
+
+### Retraining on Your Own Data
+
+If you want to improve accuracy for your specific environment:
+
+```bash
+# Collect 2+ minutes of CSI from your ESP32
+python scripts/collect-training-data.py --port 5006 --duration 120
+
+# Retrain (uses ruvllm, no PyTorch needed)
+node scripts/train-ruvllm.js --data data/recordings/*.csi.jsonl
+
+# Benchmark your retrained model
+node scripts/benchmark-ruvllm.js --model models/csi-ruvllm
+```
+
+---
+
+## Health & Wellness Applications
+
+WiFi sensing can monitor health metrics without any wearable or camera:
+
+```bash
+# Sleep quality monitoring (run overnight)
+node scripts/sleep-monitor.js --port 5006 --bind 192.168.1.20
+
+# Breathing disorder pre-screening
+node scripts/apnea-detector.js --port 5006 --bind 192.168.1.20
+
+# Stress detection via heart rate variability
+node scripts/stress-monitor.js --port 5006 --bind 192.168.1.20
+
+# Walking analysis + tremor detection
+node scripts/gait-analyzer.js --port 5006 --bind 192.168.1.20
+
+# Replay on recorded data (no live hardware needed)
+node scripts/sleep-monitor.js --replay data/recordings/*.csi.jsonl
+```
+
+> **Note:** These are pre-screening tools, not medical devices. Consult a healthcare professional for diagnosis.
+
+---
+
+## ruvllm Training Pipeline
+
+All training uses **ruvllm** — a Rust-native ML runtime. No Python, no PyTorch, no GPU drivers required. Runs on any machine with Node.js.
+
+### 5-Phase Training
+
+| Phase | What | Duration (M4 Pro) |
+|-------|------|--------------------|
+| Contrastive pretraining | Triplet + InfoNCE loss on CSI embeddings | ~5s |
+| Task head training | Presence, activity, vitals classifiers | ~10s |
+| LoRA refinement | Per-node room adaptation (rank-4) | ~4s |
+| TurboQuant quantization | 2/4/8-bit with <0.5% quality loss | <1s |
+| EWC consolidation | Prevent catastrophic forgetting | <1s |
+
+```bash
+# Basic training
+node scripts/train-ruvllm.js --data data/recordings/pretrain-*.csi.jsonl
+
+# Benchmark
+node scripts/benchmark-ruvllm.js --model models/csi-ruvllm
+```
+
+### Quantization Options
+
+| Bits | Size | Compression | Quality Loss | Use Case |
+|------|------|-------------|-------------|----------|
+| fp32 | 48 KB | 1x | 0% | Development |
+| 8-bit | 16 KB | 4x | <0.01% | Cognitum Seed inference |
+| 4-bit | 8 KB | 8x | <0.1% | Recommended for deployment |
+| 2-bit | 4 KB | 16x | <1% | ESP32-S3 SRAM (edge inference) |
+
+### Key Features
+
+- **SONA adaptation** — Adapts to new rooms in <1ms without retraining
+- **LoRA adapters** — 2,048 parameters per room, hot-swappable
+- **EWC protection** — Learns new rooms without forgetting previous ones
+- **Deterministic** — Same seed always produces same model (reproducible)
+- **10x data augmentation** — Temporal interpolation, noise injection, cross-node blending
+
+---
+
 ## Docker Compose (Multi-Service)
 
 For production deployments with both Rust and Python services:
@@ -1291,6 +1699,28 @@ Ensure Rust 1.75+ is installed (1.85+ recommended):
 rustup update stable
 rustc --version
 ```
+
+### Build: Linux native desktop prerequisites
+
+If you are compiling the Rust workspace on a Debian/Ubuntu-based Linux system, install the native desktop development packages first:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential pkg-config \
+  libglib2.0-dev libgtk-3-dev \
+  libsoup-3.0-dev \
+  libjavascriptcoregtk-4.1-dev \
+  libwebkit2gtk-4.1-dev
+```
+
+Then rerun:
+
+```bash
+cargo build --release
+```
+
+This is the same Linux pre-step referenced in the Rust source build section and covers the common GTK/WebKit `pkg-config` requirements used by the desktop build.
 
 ### Windows: RSSI mode shows no data
 

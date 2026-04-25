@@ -17,6 +17,8 @@ members = [
     "crates/wifi-densepose-vitals",
     "crates/wifi-densepose-ruvector",
     "crates/wifi-densepose-desktop",
+    "crates/wifi-densepose-pointcloud",
+    "crates/wifi-densepose-geo",
 ]
 # ADR-040: WASM edge crate targets wasm32-unknown-unknown (no_std),
 # excluded from workspace to avoid breaking `cargo test --workspace`.
@@ -117,6 +119,7 @@ midstreamer-temporal-compare = "0.1.0"
 midstreamer-attractor = "0.1.0"
 
 # ruvector integration (published on crates.io)
+# Vendored at v2.1.0 in vendor/ruvector; using crates.io versions until published.
 ruvector-mincut = "2.0.4"
 ruvector-attn-mincut = "2.0.4"
 ruvector-temporal-tensor = "2.0.4"
