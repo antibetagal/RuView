@@ -3,7 +3,7 @@
 ## Project: wifi-densepose
 
 WiFi-based human pose estimation using Channel State Information (CSI).
-Dual codebase: Python v1 (`v1/`) and Rust port (`rust-port/wifi-densepose-rs/`).
+Dual codebase: Python v1 (`v1/`) and Rust port (`v2/`).
 ### Key Rust Crates
 | Crate | Description |
 |-------|-------------|
@@ -22,6 +22,7 @@ Dual codebase: Python v1 (`v1/`) and Rust port (`rust-port/wifi-densepose-rs/`).
 | `wifi-densepose-sensing-server` | Lightweight Axum server for WiFi sensing UI |
 | `wifi-densepose-wifiscan` | Multi-BSSID WiFi scanning (ADR-022) |
 | `wifi-densepose-vitals` | ESP32 CSI-grade vital sign extraction (ADR-021) |
+| `nvsim` | Deterministic NV-diamond magnetometer pipeline simulator (ADR-089) — standalone leaf, WASM-ready |
 
 ### RuvSense Modules (`signal/src/ruvsense/`)
 | Module | Purpose |
@@ -84,17 +85,17 @@ All 5 ruvector crates integrated in workspace:
 ### Build & Test Commands (this repo)
 ```bash
 # Rust — full workspace tests (1,031+ tests, ~2 min)
-cd rust-port/wifi-densepose-rs
+cd v2
 cargo test --workspace --no-default-features
 
 # Rust — single crate check (no GPU needed)
 cargo check -p wifi-densepose-train --no-default-features
 
 # Python — deterministic proof verification (SHA-256)
-python v1/data/proof/verify.py
+python archive/v1/data/proof/verify.py
 
 # Python — test suite
-cd v1 && python -m pytest tests/ -x -q
+cd archive/v1 && python -m pytest tests/ -x -q
 ```
 
 ### ESP32 Firmware Build (Windows — Python subprocess required)
@@ -151,12 +152,12 @@ Crates must be published in dependency order:
 
 ```bash
 # 1. Rust tests — must be 1,031+ passed, 0 failed
-cd rust-port/wifi-densepose-rs
+cd v2
 cargo test --workspace --no-default-features
 
 # 2. Python proof — must print VERDICT: PASS
-cd ../..
-python v1/data/proof/verify.py
+cd ..
+python archive/v1/data/proof/verify.py
 
 # 3. Generate witness bundle (includes both above + firmware hashes)
 bash scripts/generate-witness-bundle.sh
@@ -169,8 +170,8 @@ bash VERIFY.sh
 **If the Python proof hash changes** (e.g., numpy/scipy version update):
 ```bash
 # Regenerate the expected hash, then verify it passes
-python v1/data/proof/verify.py --generate-hash
-python v1/data/proof/verify.py
+python archive/v1/data/proof/verify.py --generate-hash
+python archive/v1/data/proof/verify.py
 ```
 
 **Witness bundle contents** (`dist/witness-bundle-ADR028-<sha>.tar.gz`):
@@ -183,9 +184,9 @@ python v1/data/proof/verify.py
 - `VERIFY.sh` — One-command self-verification for recipients
 
 **Key proof artifacts:**
-- `v1/data/proof/verify.py` — Trust Kill Switch: feeds reference signal through production pipeline, hashes output
-- `v1/data/proof/expected_features.sha256` — Published expected hash
-- `v1/data/proof/sample_csi_data.json` — 1,000 synthetic CSI frames (seed=42)
+- `archive/v1/data/proof/verify.py` — Trust Kill Switch: feeds reference signal through production pipeline, hashes output
+- `archive/v1/data/proof/expected_features.sha256` — Published expected hash
+- `archive/v1/data/proof/sample_csi_data.json` — 1,000 synthetic CSI frames (seed=42)
 - `docs/WITNESS-LOG-028.md` — 11-step reproducible verification procedure
 - `docs/adr/ADR-028-esp32-capability-audit.md` — Complete audit record
 
@@ -211,13 +212,13 @@ Active feature branch: `ruvsense-full-implementation` (PR #77)
 - NEVER save to root folder — use the directories below
 - `docs/adr/` — Architecture Decision Records (43 ADRs)
 - `docs/ddd/` — Domain-Driven Design models
-- `rust-port/wifi-densepose-rs/crates/` — Rust workspace crates (15 crates)
-- `rust-port/wifi-densepose-rs/crates/wifi-densepose-signal/src/ruvsense/` — RuvSense multistatic modules (14 files)
-- `rust-port/wifi-densepose-rs/crates/wifi-densepose-ruvector/src/viewpoint/` — Cross-viewpoint fusion (5 files)
-- `rust-port/wifi-densepose-rs/crates/wifi-densepose-hardware/src/esp32/` — ESP32 TDM protocol
+- `v2/crates/` — Rust workspace crates (15 crates)
+- `v2/crates/wifi-densepose-signal/src/ruvsense/` — RuvSense multistatic modules (14 files)
+- `v2/crates/wifi-densepose-ruvector/src/viewpoint/` — Cross-viewpoint fusion (5 files)
+- `v2/crates/wifi-densepose-hardware/src/esp32/` — ESP32 TDM protocol
 - `firmware/esp32-csi-node/main/` — ESP32 C firmware (channel hopping, NVS config, TDM)
-- `v1/src/` — Python source (core, hardware, services, api)
-- `v1/data/proof/` — Deterministic CSI proof bundles
+- `archive/v1/src/` — Python source (core, hardware, services, api)
+- `archive/v1/data/proof/` — Deterministic CSI proof bundles
 - `.claude-flow/` — Claude Flow coordination state (committed for team sharing)
 - `.claude/` — Claude Code settings, agents, memory (committed for team sharing)
 
@@ -243,7 +244,7 @@ Active feature branch: `ruvsense-full-implementation` (PR #77)
 Before merging any PR, verify each item applies and is addressed:
 
 1. **Rust tests pass** — `cargo test --workspace --no-default-features` (1,031+ passed, 0 failed)
-2. **Python proof passes** — `python v1/data/proof/verify.py` (VERDICT: PASS)
+2. **Python proof passes** — `python archive/v1/data/proof/verify.py` (VERDICT: PASS)
 3. **README.md** — Update platform tables, crate descriptions, hardware tables, feature summaries if scope changed
 4. **CLAUDE.md** — Update crate table, ADR list, module tables, version if scope changed
 5. **CHANGELOG.md** — Add entry under `[Unreleased]` with what was added/fixed/changed

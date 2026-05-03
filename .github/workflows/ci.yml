@@ -79,13 +79,13 @@ jobs:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          rust-port/wifi-densepose-rs/target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('rust-port/wifi-densepose-rs/Cargo.lock') }}
+          v2/target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('v2/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-cargo-
 
     - name: Run Rust tests
-      working-directory: rust-port/wifi-densepose-rs
+      working-directory: v2
       run: cargo test --workspace --no-default-features
 
   # Unit and Integration Tests
@@ -255,7 +255,7 @@ jobs:
         docker stop test-container
 
     - name: Run container security scan
-      uses: aquasecurity/trivy-action@master
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       with:
         image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
         format: 'sarif'
@@ -310,26 +310,27 @@ jobs:
     runs-on: ubuntu-latest
     needs: [code-quality, test, rust-tests, performance-test, docker-build, docs]
     if: always()
+    # GitHub Actions does not allow `secrets.X` directly in step-level `if:`
+    # expressions — only `env.X`. Promote the secret to env at job scope so
+    # the gating expression below is parseable.
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     steps:
     - name: Notify Slack on success
-      if: ${{ secrets.SLACK_WEBHOOK_URL != '' && needs.code-quality.result == 'success' && needs.test.result == 'success' && needs.docker-build.result == 'success' }}
+      if: ${{ env.SLACK_WEBHOOK_URL != '' && needs.code-quality.result == 'success' && needs.test.result == 'success' && needs.docker-build.result == 'success' }}
       uses: 8398a7/action-slack@v3
       with:
         status: success
         channel: '#ci-cd'
         text: '✅ CI pipeline completed successfully for ${{ github.ref }}'
-      env:
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
     - name: Notify Slack on failure
-      if: ${{ secrets.SLACK_WEBHOOK_URL != '' && (needs.code-quality.result == 'failure' || needs.test.result == 'failure' || needs.docker-build.result == 'failure') }}
+      if: ${{ env.SLACK_WEBHOOK_URL != '' && (needs.code-quality.result == 'failure' || needs.test.result == 'failure' || needs.docker-build.result == 'failure') }}
       uses: 8398a7/action-slack@v3
       with:
         status: failure
         channel: '#ci-cd'
         text: '❌ CI pipeline failed for ${{ github.ref }}'
-      env:
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
     - name: Create GitHub Release
       if: github.ref == 'refs/heads/main' && needs.docker-build.result == 'success'

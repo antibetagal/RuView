@@ -119,7 +119,7 @@ This prepares the native GTK/WebKit dependencies used by the desktop/Tauri crate
 
 ```bash
 git clone https://github.com/ruvnet/RuView.git
-cd RuView/rust-port/wifi-densepose-rs
+cd RuView/v2
 
 # Build
 cargo build --release
@@ -279,7 +279,7 @@ Uses CoreWLAN via a Swift helper binary. macOS Sonoma 14.4+ redacts real BSSIDs;
 
 ```bash
 # Compile the Swift helper (once)
-swiftc -O v1/src/sensing/mac_wifi.swift -o mac_wifi
+swiftc -O archive/v1/src/sensing/mac_wifi.swift -o mac_wifi
 
 # Run natively
 ./target/release/sensing-server --source macos --http-port 3000 --ws-port 3001 --tick-ms 500
@@ -558,7 +558,7 @@ RuView can generate real-time 3D point clouds by fusing camera depth estimation 
 
 ```bash
 # Build the pointcloud binary
-cd rust-port/wifi-densepose-rs
+cd v2
 cargo build --release -p wifi-densepose-pointcloud
 
 # Start the server (auto-detects camera + CSI). Loopback-only by default.
