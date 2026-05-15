@@ -8,6 +8,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Real-time CSI introspection / low-latency tap on `wifi-densepose-sensing-server` (ADR-099).**
+  New `wifi_densepose_sensing_server::introspection` module wires
+  [midstream](https://github.com/ruvnet/midstream)'s `temporal-attractor` (Lyapunov +
+  regime classification) and `temporal-compare` (DTW pattern matching) as a
+  **parallel tap** alongside RuView's existing event pipeline — no replacement,
+  no behaviour change to the existing `/ws/sensing` fan-out or `wifi-densepose-signal`
+  DSP. Two new endpoints (off by default, enabled via `--introspection`):
+  - `GET /ws/introspection` — newline-delimited JSON snapshots streamed at the CSI
+    frame rate. Each snapshot carries `frame_count`, `regime` (Idle / Periodic /
+    Transient / Chaotic / Unknown), `lyapunov_exponent`, `attractor_dim`,
+    `attractor_confidence`, `regime_changed` (boolean — flips on the first frame
+    after a regime transition), and `top_k_similarity[]` (highest-scoring
+    signature matches against a per-deployment library).
+  - `GET /api/v1/introspection/snapshot` — single-shot JSON snapshot, auth-gated
+    when `RUVIEW_API_TOKEN` is set.
+  Per-frame `update()` budget measured at **0.041 ms p99** on the I5 bench
+  (~24× under ADR-099 D4's 1 ms target). Shape-match latency on a 1-D
+  mean-amplitude L1 stand-in: **5 frames** (3.20× ratio vs the 16-frame event-path
+  floor). ADR-099 D8 honestly amended — the aspirational 10× bar is contingent on
+  ADR-208 Phase 2 multi-dim NPU embeddings; this release ships the tap off-by-default
+  while the foundation lands. 8 lib tests + 5 latency/regression tests (`tests/introspection_latency.rs`,
+  including a 200-frame noise warm-up → 10-frame motion-ramp signature benchmark).
+- **Opt-in bearer-token auth on `wifi-densepose-sensing-server`'s `/api/v1/*` HTTP surface (closes #443).**
+  New `wifi_densepose_sensing_server::bearer_auth` module: when the
+  `RUVIEW_API_TOKEN` env var is set, every request whose path begins with
+  `/api/v1/` must carry an `Authorization: Bearer <token>` header (constant-time
+  compared) or the server responds `401 Unauthorized`. When the variable is
+  unset or empty the middleware is a no-op — the long-standing LAN-only
+  deployment posture is preserved, so this is a binary deployment-time switch
+  with **no default behaviour change**. `/health*`, `/ws/sensing`, and the
+  `/ui/*` static mount are intentionally never gated (orchestrator probes +
+  local browsers). Startup logs which mode is active and warns when auth is on
+  with a `0.0.0.0` bind. 8 unit tests on the middleware (lib test count 191 → 199).
+  Resolves the security audit raised in #443.
+
+### Changed
+- **Docker image: build-time guard for the UI assets, plus a CI workflow that
+  rebuilds and pushes on every change (closes #520, #514).** `docker/Dockerfile.rust`
+  now `RUN`s a guard after `COPY ui/` that fails the build if any of
+  `index.html` / `observatory.html` / `pose-fusion.html` / `viz.html` / the
+  `observatory/` / `pose-fusion/` / `components/` / `services/` directories are
+  missing, so a stale image can never be silently produced again. New
+  `.github/workflows/sensing-server-docker.yml` builds the image on push to
+  `main` (paths-filtered) and on `v*` tags and pushes to both
+  `docker.io/ruvnet/wifi-densepose` and `ghcr.io/ruvnet/wifi-densepose` with
+  `latest` + `vX.Y.Z` + `sha-<short>` tags, then smoke-tests the published
+  artifact: `/health`, `/api/v1/info`, the observatory + pose-fusion UI assets,
+  and the `RUVIEW_API_TOKEN` auth path (no token → 401, wrong → 401, correct
+  → 200). Uses `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repo secrets for the
+  Docker Hub push; ghcr.io uses the workflow's `GITHUB_TOKEN`.
+- **rvCSI moved to its own repo and is now vendored as a submodule.** The 9 `rvcsi-*`
+  crates (`rvcsi-core`/`-dsp`/`-events`/`-adapter-file`/`-adapter-nexmon`/`-ruvector`/
+  `-runtime`/`-node`/`-cli` — added inline in #542) now live in
+  [`github.com/ruvnet/rvcsi`](https://github.com/ruvnet/rvcsi): published to crates.io
+  as `rvcsi-* 0.3.x`, to npm as `@ruv/rvcsi`, with a Claude Code plugin marketplace and
+  a RuView-style README. RuView vendors it under `vendor/rvcsi` (alongside
+  `vendor/ruvector` / `vendor/midstream` / `vendor/sublinear-time-solver`) and no longer
+  carries inline copies in `v2/crates/`; consumers depend on the published crates (or the
+  submodule's `crates/rvcsi-*` paths). `v2/Cargo.toml`, `CLAUDE.md`, and the README docs
+  table updated accordingly. The ADRs (ADR-095, ADR-096), PRD, and DDD model stay in
+  `docs/` here as the design record of the incubation.
+
+### Fixed
+- **README: corrected the camera-supervised pose-accuracy claim.** The README stated
+  "92.9% PCK@20" for camera-supervised training; that figure does not appear in
+  ADR-079 and is ~2.6× the ADR's own success target (>35% PCK@20). ADR-079 phases
+  P7 (data collection), P8 (training + evaluation on real paired data) and P9
+  (cross-room LoRA) are still `Pending`, so no measured camera-supervised PCK@20 has
+  been published. README now states the proxy-supervised baseline (≈2.5%) and the
+  ADR-079 target (35%+), and notes the eval phases are pending. Surfaced by the
+  PowerPlatePulse training-pipeline audit (2026-05-11); 6 remaining audit findings
+  tracked in the PR.
+- **rvCSI `BaselineDriftDetector`: drift thresholds are now scale-relative, not absolute.**
+  The detector compared `mean_amplitude` against its EWMA baseline with absolute
+  thresholds (`anomaly_threshold = 1.0`, `drift_threshold = 0.15`) — fine for the
+  synthetic unit tests (amplitudes ≈ 1.0), but raw ESP32 CSI is `int8` I/Q with
+  amplitudes up to ~128, so the window-to-window RMS distance is routinely 5–50 ≫ 1.0
+  and `AnomalyDetected` fired on ~96 % of windows (319/331 on a real node-1 capture).
+  Drift is now `‖current − baseline‖₂ / ‖baseline‖₂` (a fraction, with an `eps` floor
+  for a degenerate near-zero baseline), so one tuning works across raw-`int8` ESP32,
+  `int16`-scaled Nexmon, and baseline-subtracted streams alike — `AnomalyDetected`
+  drops to 40/331 on the same data, the existing detector tests still pass, and a
+  `baseline_drift_is_scale_invariant_no_anomaly_storm` regression test was added.
+  ADR-095 D13 / ADR-096 §2.1, §5 updated. Surfaced by an end-to-end test against
+  real ESP32 CSI (a 7,000-frame node-1 capture; transcoder at
+  `scripts/esp32_jsonl_to_rvcsi.py`).
+
+### Added
+- **rvCSI — edge RF sensing runtime (design + first implementation).** New subsystem **rvCSI**: a Rust-first / TypeScript-accessible / hardware-abstracted edge RF sensing runtime that normalizes WiFi CSI from Nexmon, ESP32, Intel, Atheros, file and replay sources into one validated `CsiFrame` schema, runs reusable DSP, emits typed confidence-scored events, and bridges to RuVector RF memory, an MCP tool server and a TS SDK.
+  - **Design docs:** `docs/prd/rvcsi-platform-prd.md` (purpose, users, success criteria, FR1–FR10, NFRs, system architecture, data model); `docs/adr/ADR-095-rvcsi-edge-rf-sensing-platform.md` (the 15 architectural decisions: Rust core, C-at-the-boundary, TS SDK via napi-rs, normalized schema, validate-before-FFI, CSI-as-temporal-delta, RuVector as RF memory, replayability, detection≠decision, local-first, read-first/write-gated MCP, mandatory quality scoring, versioned calibration, plugin adapters); `docs/adr/ADR-096-rvcsi-ffi-crate-layout.md` (crate topology, the napi-c shim record format & contract, the napi-rs Node surface, build/test invariants); `docs/ddd/rvcsi-domain-model.md` (7 bounded contexts: Capture, Validation, Signal, Calibration, Event, Memory, Agent — with aggregates, invariants, context map and domain services). Indexed in `docs/adr/README.md` and `docs/ddd/README.md`.
+  - **Crates** (9 new `v2/crates/rvcsi-*` workspace members): `rvcsi-core` (normalized `CsiFrame`/`CsiWindow`/`CsiEvent` schema, `AdapterProfile`, `CsiSource` plugin trait, id newtypes + `IdGenerator`, `RvcsiError`, the `validate_frame` pipeline + quality scoring; `forbid(unsafe_code)`); `rvcsi-adapter-nexmon` — the **napi-c** seam: `native/rvcsi_nexmon_shim.{c,h}` (the only C in the runtime — allocation-free, bounds-checked, ABI `1.1`), compiled via `build.rs`+`cc`, handling **two byte formats** — the compact self-describing "rvCSI Nexmon record", and the **real nexmon_csi UDP payload** (the 18-byte `magic 0x1111 · rssi · fctl · src_mac · seq · core/stream · chanspec · chip_ver` header + `nsub` int16 I/Q samples, the modern BCM43455c0/4358/4366c0 export read by CSIKit/`csireader.py`), with a Broadcom d11ac **chanspec decoder** (channel/bandwidth/band) — plus a pure-Rust **libpcap reader** (classic `.pcap`, all byte-order/timestamp-resolution magics, Ethernet/raw-IPv4/Linux-SLL link types) and a **Nexmon-chip / Raspberry-Pi-model registry** (`NexmonChip` / `RaspberryPiModel` — including the **Raspberry Pi 5** (CYW43455/BCM43455c0, same wireless as the Pi 4 — 20/40/80 MHz, 2.4+5 GHz, 64/128/256 subcarriers), the Pi 3B+/4/400, and the Pi Zero 2 W (BCM43436b0); `nexmon_adapter_profile` / `raspberry_pi_profile` build the per-chip `AdapterProfile`; `chip_ver` words auto-resolve to a chip). Wrapped by a documented `ffi` module and two `CsiSource`s: `NexmonAdapter` (record buffers) and `NexmonPcapAdapter` (real nexmon_csi UDP inside a `tcpdump -i wlan0 dst port 5500 -w csi.pcap` capture — the pcap timestamp stamps each frame; the chip is auto-detected from `chip_ver`, overridable via `.with_pi_model(Pi5)` / `.with_chip(...)`). `rvcsi-dsp` (DC removal, phase unwrap, smoothing, Hampel/MAD filter, sliding variance, baseline subtraction, motion-energy/presence/confidence features, heuristic breathing-band estimate, non-destructive `SignalPipeline`); `rvcsi-events` (`WindowBuffer`, the `EventDetector` trait + presence/motion/quality/baseline-drift state machines, `EventPipeline`; the baseline-drift detector uses **scale-relative** thresholds — drift as a fraction of the baseline's RMS magnitude — so one tuning works across raw-`int8` ESP32, `int16`-scaled Nexmon, and baseline-subtracted streams alike); `rvcsi-adapter-file` (the `.rvcsi` JSONL capture format, `FileRecorder`, `FileReplayAdapter` deterministic replay); `rvcsi-ruvector` (deterministic window/event embeddings, `cosine_similarity`, the `RfMemoryStore` trait, `InMemoryRfMemory` + `JsonlRfMemory` — a standin until the production RuVector binding); `rvcsi-runtime` (the no-FFI composition layer: `CaptureRuntime` = `CsiSource` + `validate_frame` + `SignalPipeline` + `EventPipeline`, plus one-shot helpers `summarize_capture`/`decode_nexmon_records`/`decode_nexmon_pcap`/`summarize_nexmon_pcap`/`events_from_capture`/`export_capture_to_rf_memory`); `rvcsi-node` — the **napi-rs** seam (a `["cdylib","rlib"]` Node addon, `build.rs` runs `napi_build::setup()`; thin `#[napi]` wrappers over `rvcsi-runtime` — `nexmonDecodeRecords`/`nexmonDecodePcap` (with optional `chip`)/`inspectNexmonPcap`/`decodeChanspec`/`nexmonChipName`/`nexmonProfile`/`nexmonChips`/`inspectCaptureFile`/`eventsFromCaptureFile`/`exportCaptureToRfMemory` + an `RvcsiRuntime` streaming class; everything that crosses to JS is a validated/normalized struct serialized to JSON); `rvcsi-cli` (the `rvcsi` binary: `record` (Nexmon-dump *or* `--source nexmon-pcap [--chip pi5]` → `.rvcsi`), `inspect`, `inspect-nexmon`, `nexmon-chips`, `decode-chanspec`, `replay`, `stream`, `events`, `health`, `calibrate` v0-baseline, `export ruvector`). Plus the `@ruv/rvcsi` npm package (`package.json`/`index.js`/`index.d.ts`/`README`/`__test__`) alongside `rvcsi-node` — a curated JS surface that parses the addon's JSON into plain `CsiFrame`/`CsiWindow`/`CsiEvent`/`SourceHealth`/`CaptureSummary`/`NexmonPcapSummary`/`DecodedChanspec` objects, with a lazy native-addon load.
+  - **Tests:** 169 across the rvcsi crates (core 29, dsp 28, events 19 — incl. a baseline-drift scale-invariance regression, adapter-file 20 + 1 doctest, adapter-nexmon 28 — round-tripping through the C shim and synthetic libpcap files, incl. Pi 5 / chip-detection, ruvector 20 + 1 doctest, runtime 13, cli 10), 0 failures; all rvcsi crates build together and are clippy-clean (`rvcsi-node` under `deny(clippy::all)`); `forbid(unsafe_code)` everywhere except `rvcsi-adapter-nexmon` (FFI, every `unsafe` block documented). Also exercised end-to-end against a real 7,000-frame ESP32 node-1 capture (transcoded with `scripts/esp32_jsonl_to_rvcsi.py` — the stand-in for the not-yet-shipped `record --source esp32-jsonl`): `rvcsi inspect`/`replay`/`calibrate`/`events` all run on real hardware data. Not yet wired in: live radio capture, `rvcsi-adapter-esp32` (live serial/UDP ESP32 source), the WebSocket daemon (`rvcsi-daemon`), the MCP tool server (`rvcsi-mcp`), and the legacy nexmon *packed-float* CSI export — follow-ups on top of these crates.
+- **`wifi-densepose-train`: `signal_features` module — wires `wifi-densepose-signal` into the training pipeline.** `wifi-densepose-signal` was previously a phantom dependency of `wifi-densepose-train` (listed in `Cargo.toml`, never imported). New `wifi_densepose_train::signal_features::extract_signal_features` (and `CsiSample::signal_features()`) run a windowed CSI observation's centre frame through `wifi_densepose_signal::features::FeatureExtractor`, producing a fixed-length (`FEATURE_LEN = 12`) amplitude/phase/PSD feature vector — the hook for a future vitals / multi-task supervision head (breathing- and heart-rate-band power are read off the PSD summary). The vector is produced on demand and not yet fed back into the loss. Surfaced by the 2026-05-11 training-pipeline audit (findings #1 "vitals features absent from training" and #2 "`wifi-densepose-signal` ghost dep").
+- **`wifi-densepose-train`: `TrainingConfig` subcarrier-layout presets + a real-loader integration test.** New `TrainingConfig::for_subcarriers(native, target)` plus named presets `ht40_192()` (≈192-sc ESP32 HT40 → 56) and `multiband_168()` (168-sc ADR-078 multi-band mesh → 56), so non-MM-Fi CSI shapes are first-class instead of requiring manual `native_subcarriers`/`num_subcarriers` overrides; field docs now list the supported source counts and the multi-NIC mapping. New `tests/test_real_loader.rs` round-trips synthetic CSI through `.npy` files → `MmFiDataset::discover`/`get` (including the subcarrier-interpolation branch and the empty-root case) — exercising the on-disk loader path the deterministic `verify-training` proof intentionally bypasses. Addresses training-pipeline audit findings #6 (56-sc/1-NIC config default) and #7 (multi-band mesh not in config); the #4 concern ("proof uses synthetic data") is reframed — the proof *should* use a reproducible source, and this test covers the real loader it skips.
+
+### Fixed
+- **HuggingFace `MODEL_CARD.md`: marked the PIR/BME280 environmental-sensor ground-truth path as planned, not implemented** (training-pipeline audit finding #3) — the card presented PIR/BME280 weak-label fine-tuning as a current capability; there is no env-sensor ingestion in the training pipeline today.
+- **README: corrected the camera-supervised pose-accuracy claim** (audit finding #5; see PR #535) — "92.9% PCK@20" → the ADR-079 target (35%+; proxy baseline 35.3%), noting P7/P8/P9 are pending.
+
+### Added
 - **`nvsim` crate — deterministic NV-diamond magnetometer pipeline simulator** (ADR-089) —
   New standalone leaf crate at `v2/crates/nvsim` modeling a forward-only
   magnetic sensing path: scene → source synthesis (Biot–Savart, dipole,
